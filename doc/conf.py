@@ -52,6 +52,7 @@ except Exception:
 # -- Options for HTML output ----------------------------------------------
 
 html_title = project + ' version ' + release
+html_theme = 'pyramid'
 
 # -- Options for LaTeX output ---------------------------------------------
 
