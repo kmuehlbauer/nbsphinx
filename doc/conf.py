@@ -10,6 +10,8 @@ extensions = [
     'sphinx.ext.mathjax',
 ]
 
+source_suffix = ['.rst', '.ipynb']
+
 # Exclude build directory and Jupyter backup files:
 exclude_patterns = ['_build', '**.ipynb_checkpoints']
 
