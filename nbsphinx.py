@@ -33,6 +33,7 @@ import json
 import nbconvert
 import nbformat
 import os
+import re
 import sphinx
 import subprocess
 try:
@@ -161,8 +162,12 @@ RST_TEMPLATE = """
 {%- if 'nbsphinx-toctree' in cell.metadata %}
 {{ cell | extract_toctree }}
 {%- else %}
+{%- if nb.metadata.nbsphinx.allow_directives or 'nbsphinx-directive' in cell.metadata %}
+{{ cell | wrap_cell}}
+{%- else %}
 {{ super() }}
-{% endif %}
+{%- endif %}
+{%- endif %}
 {% endblock markdowncell %}
 
 
@@ -362,9 +367,11 @@ class Exporter(nbconvert.RSTExporter):
 
     """
 
-    def __init__(self, allow_errors=False, timeout=30, codecell_lexer='none'):
+    def __init__(self, allow_errors=False, allow_directives=False,
+                 timeout=30, codecell_lexer='none'):
         """Initialize the Exporter."""
         self._allow_errors = allow_errors
+        self._allow_directives = allow_directives
         self._timeout = timeout
         self._codecell_lexer = codecell_lexer
         loader = jinja2.DictLoader({'nbsphinx-rst.tpl': RST_TEMPLATE})
@@ -374,6 +381,7 @@ class Exporter(nbconvert.RSTExporter):
                 'markdown2rst': markdown2rst,
                 'get_empty_lines': _get_empty_lines,
                 'extract_toctree': _extract_toctree,
+                'wrap_cell': _wrap_cell,
             })
 
     def from_notebook_node(self, nb, resources=None, **kw):
@@ -396,6 +404,14 @@ class Exporter(nbconvert.RSTExporter):
             pp = nbconvert.preprocessors.ExecutePreprocessor(
                 allow_errors=allow_errors, timeout=timeout)
             nb, resources = pp.preprocess(nb, resources)
+
+        # check allow directive
+        if self._allow_directives:
+            allow_directives = self._allow_directives
+        else:
+            allow_directives = nbsphinx_metadata.get('allow_directives', False)
+        nbsphinx_metadata['allow_directives'] = allow_directives
+        nb.metadata['nbsphinx'] = nbsphinx_metadata
 
         # Call into RSTExporter
         rststr, resources = super(Exporter, self).from_notebook_node(
@@ -440,6 +456,7 @@ class NotebookParser(rst.Parser):
         resources['unique_key'] = env.docname.replace('/', '_')
 
         exporter = Exporter(allow_errors=env.config.nbsphinx_allow_errors,
+                            allow_directives=env.config.nbsphinx_allow_directives,
                             timeout=env.config.nbsphinx_timeout,
                             codecell_lexer=env.config.nbsphinx_codecell_lexer)
 
@@ -514,6 +531,7 @@ class NbInput(rst.Directive):
         _set_empty_lines(node, self.options)
         node.attributes['latex_prompt'] = latex_prompt
         container += node
+        self.state.document['nbsphinx_include_css'] = True
         return [container]
 
 
@@ -563,6 +581,7 @@ class NbOutput(rst.Directive):
             _set_empty_lines(node, self.options)
             node.attributes['latex_prompt'] = latex_prompt
             container += node
+        self.state.document['nbsphinx_include_css'] = True
         return [container]
 
 
@@ -591,7 +610,11 @@ def markdown2rst(text):
         json_data = json.loads(text, object_hook=rawlatex2math_hook)
         return json.dumps(json_data)
 
-    return pandoc(text, 'markdown', 'rst', filter_func=rawlatex2math)
+    rststring = pandoc(text, 'markdown', 'rst', filter_func=rawlatex2math)
+    return re.sub(r'^(\s*)\.\. math::$',
+                  r'\1.. math::\1   :nowrap:',
+                  rststring,
+                  flags=re.MULTILINE)
 
 
 def pandoc(source, fmt, to, filter_func=None):
@@ -658,6 +681,22 @@ def _extract_toctree(cell):
         lines.append(ref.astext().replace('\n', '') +
                      ' <' + unquote(ref.get('refuri')) + '>')
     return '\n    '.join(lines)
+
+
+def _wrap_cell(cell):
+    """Wrap cell content from Markdown cell in sphinx directive."""
+    text = cell.source.split('\n', 2)
+
+    # wrap only if at least 3 lines exist
+    # and if first line corresponds to second line
+    if (len(text) > 2) and (text[1] == ('-' * len(text[0]))):
+        text = "".join([".. ", text[0].lower(), ":: \n\n   ",
+                        markdown2rst(text[2])
+                       .replace("\n", '\n   '), "\n"])
+    else:
+        text = markdown2rst(cell.source)
+
+    return text
 
 
 def _get_empty_lines(text):
@@ -808,12 +847,10 @@ def builder_inited(app):
 
 
 def html_page_context(app, pagename, templatename, context, doctree):
-    """Add CSS string to HTML pages created from notebooks."""
-    body = context.get('body')
-    # page_source_suffix is available since Sphinx version 1.3.6
-    if body and context.get('page_source_suffix') in ('.ipynb', None):
+    """Add CSS string to HTML pages that contain code cells."""
+    if doctree and doctree.get('nbsphinx_include_css'):
         style = '\n<style>' + CSS_STRING + '</style>\n'
-        context['body'] = style + body
+        context['body'] = style + context['body']
 
 
 def html_collect_pages(app):
@@ -926,6 +963,7 @@ def setup(app):
     _add_notebook_parser(app)
 
     app.add_config_value('nbsphinx_allow_errors', False, rebuild='')
+    app.add_config_value('nbsphinx_allow_directives', False, rebuild='')
     app.add_config_value('nbsphinx_timeout', 30, rebuild='')
     app.add_config_value('nbsphinx_codecell_lexer', 'none', rebuild='env')
 
